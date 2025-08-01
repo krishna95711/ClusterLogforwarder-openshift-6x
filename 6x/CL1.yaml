@@ -1,0 +1,73 @@
+# apiVersion: "observability.openshift.io/v1"
+# kind: ClusterLogForwarder
+# spec:
+#   inputs:
+#    - name: xfe-dev-logs
+#      type: application
+#      application:
+#        includes:
+#        - namespace: development
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: elasticsearch-forwarder
+  namespace: openshift-logging
+  annotations:
+    observability.openshift.io/log-level: debug
+spec:
+  serviceAccount:
+    name: log-collector-kd
+
+  inputs:
+    - name: xfe-dev-logs
+      type: application
+      application:
+        includes:
+        - namespace: development   # keep your namespace here
+
+    - name: appx-dev-logs
+      type: application
+      application:
+        includes:
+        - namespace: appx-development   # keep your namespace here
+        
+  filters:
+    - name: parse-json-logs
+      type: parse
+
+  outputs:
+    - name: xfe-logstash-output
+      type: syslog
+      syslog:
+        url: tcp://169.50.50.171:5045  # your Logstash IP and port
+        rfc: RFC5424                    # RFC format from your example
+        facility: user                 # facility from your example
+        severity: debug               # severity from your example
+
+    - name: appx-logstash-output
+      type: syslog
+      syslog:
+        url: tcp://169.50.50.171:5045  # your Logstash IP and port
+        rfc: RFC5424                    # RFC format from your example
+        facility: user                 # facility from your example
+        severity: debug               # severity from your example
+
+  pipelines:
+    - name: xfe-to-logstash
+      inputRefs:
+        - xfe-dev-logs
+      filterRefs:
+        - parse-json-logs
+      outputRefs:
+        - xfe-logstash-output
+
+    - name: appx-to-logstash
+      inputRefs:
+        - appx-dev-logs
+      filterRefs:
+        - parse-json-logs
+      outputRefs:
+        - appx-logstash-output

@@ -1,0 +1,429 @@
+# ...
+  spec:
+    outputs:
+    - name: syslogout
+      syslog:
+        enrichment: KubernetesMinimal
+        facility: user
+        payloadKey: message
+        rfc: RFC3164
+        severity: debug
+      type: syslog
+      url: tls://syslog-receiver.example.com:6514
+    pipelines:
+    - inputRefs:
+      - application
+      name: test-app
+      outputRefs:
+      - syslogout
+
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  filters:
+  - name: <filter_name>
+    type: drop 
+    drop: 
+    - test: 
+      - field: .kubernetes.labels."foo-bar/baz" 
+        matches: .+ 
+      - field: .kubernetes.pod_name
+        notMatches: "my-pod" 
+  pipelines:
+  - name: <pipeline_name> 
+    filterRefs: ["<filter_name>"]
+# ...# ...
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  filters:
+  - name: important
+    type: drop
+    drop:
+    - test:
+      - field: .message
+        notMatches: "(?i)critical|error"
+      - field: .level
+        matches: "info|warning"
+# ...
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  filters:
+  - name: important
+    type: drop
+    drop:
+    - test:
+      - field: .kubernetes.namespace_name
+        matches: "^open"
+    - test:
+      - field: .log_type
+        matches: "application"
+      - field: .kubernetes.pod_name
+        notMatches: "my-pod"
+# ...
+
+
+
+
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: <log_forwarder_name>
+  namespace: <log_forwarder_namespace>
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  pipelines:
+    - name: my-pipeline
+      inputRefs: audit 
+      filterRefs: my-policy 
+  filters:
+    - name: my-policy
+      type: kubeAPIAudit
+      kubeAPIAudit:
+        # Don't generate audit events for all requests in RequestReceived stage.
+        omitStages:
+          - "RequestReceived"
+
+        rules:
+          # Log pod changes at RequestResponse level
+          - level: RequestResponse
+            resources:
+            - group: ""
+              resources: ["pods"]
+
+          # Log "pods/log", "pods/status" at Metadata level
+          - level: Metadata
+            resources:
+            - group: ""
+              resources: ["pods/log", "pods/status"]
+
+          # Don't log requests to a configmap called "controller-leader"
+          - level: None
+            resources:
+            - group: ""
+              resources: ["configmaps"]
+              resourceNames: ["controller-leader"]
+
+          # Don't log watch requests by the "system:kube-proxy" on endpoints or services
+          - level: None
+            users: ["system:kube-proxy"]
+            verbs: ["watch"]
+            resources:
+            - group: "" # core API group
+              resources: ["endpoints", "services"]
+
+          # Don't log authenticated requests to certain non-resource URL paths.
+          - level: None
+            userGroups: ["system:authenticated"]
+            nonResourceURLs:
+            - "/api*" # Wildcard matching.
+            - "/version"
+
+          # Log the request body of configmap changes in kube-system.
+          - level: Request
+            resources:
+            - group: "" # core API group
+              resources: ["configmaps"]
+            # This rule only applies to resources in the "kube-system" namespace.
+            # The empty string "" can be used to select non-namespaced resources.
+            namespaces: ["kube-system"]
+
+          # Log configmap and secret changes in all other namespaces at the Metadata level.
+          - level: Metadata
+            resources:
+            - group: "" # core API group
+              resources: ["secrets", "configmaps"]
+
+          # Log all other resources in core and extensions at the Request level.
+          - level: Request
+            resources:
+            - group: "" # core API group
+            - group: "extensions" # Version of group should NOT be included.
+
+          # A catch-all rule to log all other requests at the Metadata level.
+          - level: Metadata
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+          apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  inputs:
+    - name: mylogs
+      application:
+        selector:
+          matchExpressions:
+          - key: env 
+            operator: In 
+            values: ["prod", "qa"] 
+          - key: zone
+            operator: NotIn
+            values: ["east", "west"]
+          matchLabels: 
+            app: one
+            name: app1
+      type: application
+# ...
+
+
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  filters:
+  - name: <filter_name>
+    type: prune 
+    prune: 
+      in: [.kubernetes.annotations, .kubernetes.namespace_id] 
+      notIn: [.kubernetes,.log_type,.message,."@timestamp"] 
+  pipelines:
+  - name: <pipeline_name> 
+    filterRefs: ["<filter_name>"]
+# ...
+
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  inputs:
+    - name: mylogs1
+      type: infrastructure
+      infrastructure:
+        sources: 
+          - node
+    - name: mylogs2
+      type: audit
+      audit:
+        sources: 
+          - kubeAPI
+          - openshiftAPI
+          - ovn
+# ...
+
+
+
+
+
+
+
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+# ...
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  inputs:
+    - name: mylogs
+      application:
+        includes:
+          - namespace: "my-project" 
+            container: "my-container" 
+        excludes:
+          - container: "other-container*" 
+            namespace: "other-namespace" 
+      type: application
+# ...
+
+
+
+
+apiVersion: "observability.openshift.io/v1"
+kind: ClusterLogForwarder
+metadata:
+  name: <log_forwarder_name>
+  namespace: <log_forwarder_namespace>
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  filters:
+  - name: <name>
+    type: detectMultilineException
+  pipelines:
+    - inputRefs:
+        - <input-name>
+      name: <pipeline-name>
+      filterRefs:
+        - <filter-name>
+      outputRefs:
+        - <output-name>
+
+
+
+
+
+
+        apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: <log_forwarder_name>
+  namespace: <log_forwarder_namespace>
+spec:
+  managementState: Managed
+  outputs:
+  - name: <output_name>
+    type: http
+    http:
+      headers:  
+          h1: v1
+          h2: v2
+      authentication:
+        username:
+          key: username
+          secretName: <http_auth_secret>
+        password:
+          key: password
+          secretName: <http_auth_secret>
+      timeout: 300
+      proxyURL: <proxy_url> 
+      url: <url> 
+    tls:
+      insecureSkipVerify: 
+      ca:
+        key: <ca_certificate>
+        secretName: <secret_name> 
+  pipelines:
+    - inputRefs:
+        - application
+      name: pipe1
+      outputRefs:
+        - <output_name>  
+  serviceAccount:
+    name: <service_account_name> 
+
+
+
+
+
+    apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: collector
+spec:
+  managementState: Managed
+  outputs:
+  - name: rsyslog-east 
+    syslog:
+      appName: <app_name> 
+      enrichment: KubernetesMinimal
+      facility: <facility_value> 
+      msgId: <message_ID> 
+      payloadKey: <record_field> 
+      procId: <process_ID> 
+      rfc: <RFC3164_or_RFC5424> 
+      severity: informational 
+      tuning:
+        deliveryMode: <AtLeastOnce_or_AtMostOnce> 
+      url: <url> 
+    tls: 
+      ca:
+        key: ca-bundle.crt
+        secretName: syslog-secret
+    type: syslog
+  pipelines:
+  - inputRefs: 
+    - application
+    name: syslog-east 
+    outputRefs:
+    - rsyslog-east
+  serviceAccount: 
+    name: logcollector
+
+
+
+
+
+    apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  annotations:
+    observability.openshift.io/tech-preview-otlp-output: "enabled" 
+  name: clf-otlp
+spec:
+  serviceAccount:
+    name: <service_account_name>
+  outputs:
+  - name: otlp
+    type: otlp
+    otlp:
+      tuning:
+        compression: gzip
+        deliveryMode: AtLeastOnce
+        maxRetryDuration: 20
+        maxWrite: 10M
+        minRetryDuration: 5
+      url: <otlp_url> 
+  pipelines:
+  - inputRefs:
+    - application
+    - infrastructure
+    - audit
+    name: otlp-logs
+    outputRefs:
+    - otlp

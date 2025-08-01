@@ -1,0 +1,37 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+spec:
+  serviceAccount:
+    name: log-collector-kd
+  collector:
+    resources:
+      limits:
+        memory: 2Gi
+  inputs:
+    - name: appx-logs
+      type: application
+      application:
+        namespaces:
+          - appx-development
+          - appx-integration
+  outputs:
+    - name: appx-dev-int
+      type: syslog
+      syslog:
+        url: tls://169.50.50.171:5045
+        rfc: RFC5424
+        facility: local0
+        severity: debug
+        tls:
+          insecureSkipVerify: true  # 🔐 Skip TLS verification (if needed)
+  pipelines:
+    - name: to-appx-elk
+      inputRefs:
+        - appx-logs
+      outputRefs:
+        - appx-dev-int
+      parse: json
+

@@ -1,0 +1,61 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: send-app-logs-to-logstash
+  namespace: openshift-logging
+  annotations:
+    observability.openshift.io/log-level: debug
+spec:
+  serviceAccount:
+    name: log-collector-kd
+
+  inputs:
+    - name: app-logs
+      type: application
+      application:
+        namespaces:
+          - appx-development   # keep your namespace here
+
+  filters:
+    - name: drop-non-application
+      type: drop
+      drop:
+        - test:
+            - field: .log_type
+              # notMatches: "application"   # drops logs that are NOT application type
+              notMatches: "^application$"
+        - test:
+            - field: .log_type
+              matches: "^$"
+
+    - name: keep-only-development-ns
+      type: drop
+      drop:
+        - test:
+            - field: .kubernetes.namespace_name
+              notMatches: "^development"
+
+    - name: parse-json-logs
+      type: parse
+      parse:
+        type: json
+
+  outputs:
+    - name: logstash-output
+      type: syslog
+      syslog:
+        url: tcp://169.50.50.171:5045  # your Logstash IP and port
+        rfc: RFC5424                    # RFC format from your example
+        facility: user                 # facility from your example
+        severity: debug               # severity from your example
+
+  pipelines:
+    - name: app-to-logstash
+      inputRefs:
+        - app-logs
+      filterRefs:
+        - drop-non-application
+        - keep-only-development-ns
+        - parse-json-logs
+      outputRefs:
+        - logstash-output

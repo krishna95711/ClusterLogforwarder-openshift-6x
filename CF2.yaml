@@ -1,0 +1,48 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+  annotations:
+    observability.openshift.io/log-level: debug
+spec:
+  serviceAccount:
+    name: log-collector-kd
+
+  inputs:
+    - name: appx-logs
+      type: application
+      application:
+        namespaces:
+          - appx-development
+
+  outputs:
+    - name: appx-dev-int
+      type: syslog
+      syslog:
+        url: tcp://169.50.50.171:5045
+        rfc: RFC5424
+        facility: user
+        severity: debug
+
+  filters:
+    - name: keep-only-development-ns
+      type: drop
+      drop:
+        - test:
+            - field: .kubernetes.namespace_name
+              notMatches: "^development"
+    - name: parse-json-logs
+      type: parse
+      parse:
+        type: json
+
+  pipelines:
+    - name: to-appx-elk
+      inputRefs:
+        - appx-logs
+      filterRefs:
+        - keep-only-development-ns
+        - parse-json-logs
+      outputRefs:
+        - appx-dev-int

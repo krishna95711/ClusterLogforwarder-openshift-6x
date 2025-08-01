@@ -1,0 +1,233 @@
+input {
+  pipeline {
+    address => "es"
+  }
+}
+
+filter {
+  ###############################################
+  # 1. Extract trailing JSON from syslog-ish message
+  ###############################################
+  grok {
+    match => {
+      "message" => "^<%{NONNEGINT:syslog_pri}>%{NONNEGINT:syslog_ver} %{TIMESTAMP_ISO8601:syslog_ts} %{HOSTNAME:node} %{DATA:namespace_podpipeline} %{DATA:pod_uid} %{WORD:log_source} - %{GREEDYDATA:log_json}$"
+    }
+    tag_on_failure => ["grok_fail"]
+  }
+
+  ###############################################
+  # 2. Parse extracted JSON into [jsondata]
+  ###############################################
+  json {
+    source => "log_json"
+    target => "jsondata"
+    tag_on_failure => ["json_fail"]
+  }
+
+  ###############################################
+  # 3. Move key fields up for compatibility; strip cri-o:// or docker:// prefix
+  ###############################################
+  mutate {
+    add_field => {
+      "app_id" => "%{[jsondata][kubernetes][container_id]}"
+      "app_instance" => "%{[jsondata][kubernetes][pod_name]}"
+    }
+    gsub => [
+      "app_id", "^cri-o://", "",
+      "app_id", "^docker://", ""
+    ]
+  }
+
+  ###############################################
+  # 4. Extract structured field to details, parsing if needed (without tag_on_failure)
+  ###############################################
+  ruby {
+    code => '
+      begin
+        details = event.get("[jsondata][structured]")
+        if details.is_a?(String)
+          require "json"
+          begin
+            event.set("details", JSON.parse(details))
+          rescue
+            event.set("details", details)
+          end
+        elsif details
+          event.set("details", details)
+        end
+      rescue
+        event.set("details", nil)
+      end
+    '
+  }
+
+  ###############################################
+  # 5. Drop irrelevant app_instances
+  ###############################################
+  if ![app_instance] or [app_instance] !~ "(xfe|APP)" {
+    drop { }
+  }
+
+  ###############################################
+  # 6. Enrichment and normalization
+  ###############################################
+
+  if [details][req][headers][true-client-ip] {
+    geoip {
+      source => "[details][req][headers][true-client-ip]"
+      target => "[details][req][geoip]"
+      fields => ["city_name", "continent_code", "country_name"]
+    }
+  }
+
+  if [details][user][email] =~ ".+@.+" {
+    mutate {
+      add_field => {
+        "[details][user][domain]" => "%{[details][user][email]}"
+      }
+      gsub => ["[details][user][domain]", "^.+@", ""]
+    }
+  }
+
+  if [details][req] {
+    mutate {
+      copy => { "[details][req][url]" => "req.url" }
+      copy => { "[details][req][path]" => "req.path" }
+      copy => { "[details][req][method]" => "req.method" }
+    }
+    if [details][req][headers] {
+      mutate {
+        copy => { "[details][req][headers][true-client-ip]" => "req.headers.true-client-ip" }
+        copy => { "[details][req][headers][user-agent]" => "req.headers.user-agent"}
+        copy => { "[details][req][headers][x-ui]" => "req.headers.x-ui"}
+        copy => { "[details][req][headers][x-cp4s]" => "req.headers.x-cp4s"}
+      }
+    }
+
+    if [req.url] =~ /^\/(api\/)?taxii/ {
+      mutate { add_field => { "req.endpoint" => "taxii" }}
+    } else if ([req.url] =~ /\/comments\//) {
+      mutate { add_field => { "req.endpoint" => "comments" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\/mobile\//) {
+      mutate { add_field => { "req.endpoint" => "url mobile" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\/malware\//) {
+      mutate { add_field => { "req.endpoint" => "url malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\//) {
+      mutate { add_field => { "req.endpoint" => "url" }}
+    } else if ([req.url] =~ /^\/(api\/)?app\//) {
+      mutate { add_field => { "req.endpoint" => "app" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/history\//) {
+      mutate { add_field => { "req.endpoint" => "ipr history" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/malware\//) {
+      mutate { add_field => { "req.endpoint" => "ipr malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/asn\//) {
+      mutate { add_field => { "req.endpoint" => "ipr asn" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\//) {
+      mutate { add_field => { "req.endpoint" => "ipr" }}
+    } else if ([req.url] =~ /^\/(api\/)?resolve\//) {
+      mutate { add_field => { "req.endpoint" => "resolve" }}
+    } else if ([req.url] =~ /^\/(api\/)?malware\/familyext\//) {
+      mutate { add_field => { "req.endpoint" => "malware familyext" }}
+    } else if ([req.url] =~ /^\/(api\/)?malware\//) {
+      mutate { add_field => { "req.endpoint" => "malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?signature\//) {
+      mutate { add_field => { "req.endpoint" => "signature" }}
+    } else if ([req.url] =~ /^\/(api\/)?vulnerabilities\//) {
+      mutate { add_field => { "req.endpoint" => "vulnerabilities" }}
+    } else if ([req.url] =~ /^\/(api\/)?casefiles\//) {
+      mutate { add_field => { "req.endpoint" => "casefiles" }}
+    } else if ([req.url] =~ /^\/(api\/)?collection\//) {
+      mutate { add_field => { "req.endpoint" => "collection" }}
+    } else if ([req.url] =~ /^\/(api\/)?hub\//) {
+      mutate { add_field => { "req.endpoint" => "hub" }}
+    }
+  }
+
+  ###############################################
+  # 7. Prune unwanted fields
+  ###############################################
+  prune {
+    blacklist_names => [
+      "^caseFile", "^group", "^mail", "^ma_xgs", "^num", "req$", "^sbsSubscri",
+      "^subscription", "^userDataModel", "^e.originalError", "^e.request",
+      "^info.", "^taxii_11:Inbox_Message", "^taxii_11:Poll_Request",
+      "^history", "^reject.request", "^status$"
+    ]
+  }
+
+  ###############################################
+  # 8. Fix [details][err] to be always a string (avoid ES mapping conflicts)
+  ###############################################
+  ruby {
+    code => '
+      begin
+        err = event.get("[details][err]")
+        if err.is_a?(Hash) || err.is_a?(Array)
+          require "json"
+          event.set("[details][err]", err.to_json)
+        end
+      rescue
+        # Do nothing
+      end
+    '
+  }
+
+  if [details][err] and [details][err] == "" {
+    mutate { remove_field => ["[details][err]"] }
+  }
+
+  ###############################################
+  # 9. Wrap user field string into object if needed
+  ###############################################
+  if [details][user] {
+    ruby {
+      code => '
+        begin
+          u = event.get("details")["user"]
+          if u.is_a?(String)
+            event.set("[details][user]", { "user" => u })
+          end
+        rescue
+          # ignore
+        end
+      '
+    }
+  }
+
+  ###############################################
+  # 10. Final cleanup of unwanted fields
+  ###############################################
+  ruby {
+    code => '
+      event.remove("achievement")
+      event.remove("appEnv")
+      event.remove("beginTimestamp")
+      event.remove("body")
+      event.remove("config")
+      event.remove("data")
+      event.remove("contents")
+      event.remove("event")
+      event.remove("endTimestamp")
+      event.remove("headers")
+      event.remove("owner")
+      event.remove("recommendations")
+      event.remove("sbsEventSummary")
+      event.remove("tlpColor")
+      event.remove("[details][user][_json]")
+      event.remove("[details][user][apiKeyName]")
+      event.remove("[details][err][message]")
+      event.remove("watson_metrics")
+    '
+  }
+
+  mutate {
+    remove_field => ["log_json", "jsondata"]
+  }
+}
+
+output {
+  elasticsearch {
+    hosts => ["elasticsearch-svc.default.svc.cluster.local:9200"]
+    index => "logstash-appx-%{+YYYY.MM.dd}"
+  }
+}

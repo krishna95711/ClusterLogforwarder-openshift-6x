@@ -1,0 +1,87 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+spec:
+  serviceAccount:
+    name: logcollector
+  inputs:
+    - name: only-xfe-logs
+      type: application
+      application:
+        namespaces:
+          - xfe
+    - name: appx-logs
+      type: application
+      application:
+        namespaces:
+          - appx-production
+  outputs:
+    - name: rsyslog-east
+      type: syslog
+      syslog:
+        host: "74"  # Replace with your actual hostname
+        port: 5044
+        facility: user
+        severity: informational
+        appName: "openshift"
+        procID: "app"
+        msgID: "msg"
+        rfc: RFC5424
+      tls:
+        insecureSkipVerify: true  # Adjust based on your security requirements
+    - name: rsyslog-east-new-elk
+      type: syslog
+      syslog:
+        host: "east.lb.appdomain.cloud"
+        port: 5044
+        facility: user
+        severity: informational
+        appName: "openshift"
+        procID: "app"
+        msgID: "msg"
+        rfc: RFC5424
+      tls:
+        insecureSkipVerify: true
+    - name: appx-london
+      type: syslog
+      syslog:
+        host: ".171"  # Replace with your actual hostname
+        port: 50455
+        facility: user
+        severity: informational
+        appName: "openshift"
+        procID: "app"
+        msgID: "msg"
+        rfc: RFC5424
+      tls:
+        insecureSkipVerify: true
+    - name: appx-london-new-elk
+      type: syslog
+      syslog:
+        host: "5t.lb.appdomain.cloud"
+        port: 5045
+        facility: user
+        severity: informational
+        appName: "openshift"
+        procID: "app"
+        msgID: "msg"
+        rfc: RFC5424
+      tls:
+        insecureSkipVerify: true
+  pipelines:
+    - name: to-xfe-elk
+      inputRefs:
+        - only-xfe-logs
+      outputRefs:
+        - rsyslog-east
+        - rsyslog-east-new-elk
+      parse: json
+    - name: to-appx-elk
+      inputRefs:
+        - appx-logs
+      outputRefs:
+        - appx-london
+        - appx-london-new-elk
+      parse: json

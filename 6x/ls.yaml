@@ -1,0 +1,188 @@
+filter {
+
+  if [message] =~ /^{/ {
+    json {
+      source => "message"
+      skip_on_invalid_json => true
+    }
+  }
+
+  if "kubernetes" in [log] {
+    mutate {
+      rename => { "log" => "message" }
+    }
+  }
+
+  grok {
+    match => { "message" => "%{TIMESTAMP_ISO8601:syslog_ts} +%{HOSTNAME:syslog5424_host} ([a-z\- ]*)\{%{DATA:syslog_program}\} %{GREEDYDATA:json_part}" }
+    overwrite => ["message"]
+  }
+
+  json {
+    source => "json_part"
+    target => "structured"
+    skip_on_invalid_json => true
+  }
+
+  if [structured][container_id] {
+    mutate {
+      add_field => { "app_id" => "%{[structured][container_id]}" }
+    }
+  }
+
+  if [structured][app_instance] {
+    mutate {
+      add_field => { "app_instance" => "%{[structured][app_instance]}" }
+    }
+  }
+
+  if [app_instance] =~ /^APPX-/ {
+    drop { }
+  }
+
+  if [app_instance] =~ /^XFE-/ {
+    drop { }
+  }
+
+  if [app_instance] =~ /^RTR-/ {
+    drop { }
+  }
+
+  if [app_instance] =~ /^LGR-/ {
+    drop { }
+  }
+
+  mutate {
+    add_field => { "log_type" => "structured" }
+  }
+
+  ruby {
+    code => '
+      structured = event.get("structured")
+      if structured.is_a?(Hash)
+        structured.each do |k,v|
+          if v.is_a?(String) && v.length > 12000
+            structured[k] = v[0..11999] + "[TRUNCATED]"
+          end
+        end
+        event.set("structured", structured)
+      end
+    '
+  }
+
+  if [structured][req] {
+    mutate {
+      copy => { "[structured][req][url]" => "req.url" }
+      copy => { "[structured][req][path]" => "req.path" }
+      copy => { "[structured][req][method]" => "req.method" }
+    }
+    if [structured][req][headers] {
+      mutate {
+        copy => { "[structured][req][headers][true-client-ip]" => "req.headers.true-client-ip" }
+        copy => { "[structured][req][headers][user-agent]" => "req.headers.user-agent"}
+        copy => { "[structured][req][headers][x-ui]" => "req.headers.x-ui"}
+        copy => { "[structured][req][headers][x-cp4s]" => "req.headers.x-cp4s"}
+      }
+    }
+    if([req.url] =~ /^\/(api\/)?taxii/) {
+      mutate { add_field => { "req.endpoint" => "taxii" }}
+    } else if ([req.url] =~ /\/comments\//) {
+      mutate { add_field => { "req.endpoint" => "comments" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\/mobile\//) {
+      mutate { add_field => { "req.endpoint" => "url mobile" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\/malware\//) {
+      mutate { add_field => { "req.endpoint" => "url malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?url\//) {
+      mutate { add_field => { "req.endpoint" => "url" }}
+    } else if ([req.url] =~ /^\/(api\/)?app\//) {
+      mutate { add_field => { "req.endpoint" => "app" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/history\//) {
+      mutate { add_field => { "req.endpoint" => "ipr history" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/malware\//) {
+      mutate { add_field => { "req.endpoint" => "ipr malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\/asn\//) {
+      mutate { add_field => { "req.endpoint" => "ipr asn" }}
+    } else if ([req.url] =~ /^\/(api\/)?ipr\//) {
+      mutate {  add_field => { "req.endpoint" => "ipr" }}
+    } else if ([req.url] =~ /^\/(api\/)?resolve\//) {
+      mutate {  add_field => { "req.endpoint" => "resolve" }}
+    } else if ([req.url] =~ /^\/(api\/)?malware\/familyext\//) {
+      mutate {  add_field => { "req.endpoint" => "malware familyext" }}
+    } else if ([req.url] =~ /^\/(api\/)?malware\//) {
+      mutate {  add_field => { "req.endpoint" => "malware" }}
+    } else if ([req.url] =~ /^\/(api\/)?signature\//) {
+      mutate {  add_field => { "req.endpoint" => "signature" }}
+    } else if ([req.url] =~ /^\/(api\/)?vulnerabilities\//) {
+      mutate {  add_field => { "req.endpoint" => "vulnerabilities" }}
+    } else if ([req.url] =~ /^\/(api\/)?casefiles\//) {
+      mutate {  add_field => { "req.endpoint" => "casefiles" }}
+    } else if ([req.url] =~ /^\/(api\/)?collection\//) {
+      mutate {  add_field => { "req.endpoint" => "collection" }}
+    } else if ([req.url] =~ /^\/(api\/)?hub\//) {
+      mutate {  add_field => { "req.endpoint" => "hub" }}
+    }
+  }
+
+  prune {
+    exclude_keys => [
+      "^caseFile", "^group", "^mail", "^ma_xgs", "^num", "req$", "^sbsSubscri", "^subscription", "^userDataModel", "^e.originalError", "^e.request", "^info.", "^taxii_11:Inbox_Message", "^taxii_11:Poll_Request", "^history", "^reject.request", "^status$"
+    ]
+  }
+
+  if [structured][error] {
+    json_encode {
+      source => "[structured][error]"
+      target => "error"
+    }
+  }
+
+  if [structured][user] {
+    ruby {
+      code => "event.set('user', {'user' => event.get('[structured][user]')}) if event.get('[structured][user]').is_a? String"
+    }
+  }
+
+  ruby {
+    code => "
+      event.remove('achievement')
+      event.remove('appEnv')
+      event.remove('beginTimestamp')
+      event.remove('body')
+      event.remove('config')
+      event.remove('data')
+      event.remove('contents')
+      event.remove('event')
+      event.remove('endTimestamp')
+      event.remove('headers')
+      event.remove('owner')
+      event.remove('recommendations')
+      event.remove('sbsEventSummary')
+      event.remove('tlpColor')
+      event.remove('[user][_json]')
+      event.remove('[user][apiKeyName]')
+      event.remove('[err][message]')
+      event.remove('watson_metrics')"
+  }
+
+  mutate {
+    remove_field => ["details"]
+  }
+
+  if [app_instance] =~ "RTR" {
+    grok {
+      match => { "details" => "%{HOSTNAME:rtr_host} - \[%{TIMESTAMP_ISO8601:timestamp}\] \"%{NOTSPACE:method} %{URIPATHPARAM:path} %{NOTSPACE:protocol} %{NUMBER:router_status} %{NUMBER:request_size} %{NUMBER:response_size}.*response_time:%{NUMBER:response_time} gorouter_time:%{NUMBER:gorouter_time}.*x_cf_routererror:\"%{NOTSPACE:x_cf_routererror}\"%{GREEDYDATA:router_details}"}
+    }
+    mutate {
+      remove_field => ["details", "router_details"]
+    }
+  }
+
+  if [app_instance] =~ "LGR" {
+    grok {
+      match => { "details" => "%{GREEDYDATA:error}"}
+    }
+    mutate {
+      remove_field => ["details"]
+    }
+  }
+}

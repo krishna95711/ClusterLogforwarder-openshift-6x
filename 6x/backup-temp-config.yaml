@@ -1,0 +1,231 @@
+input {
+  pipeline { address => es }
+}
+
+filter {
+  # First parse the syslog message format
+  grok {
+    match => { 
+      "message" => '<%{POSINT:syslog_pri}>%{POSINT:syslog_version} %{TIMESTAMP_ISO8601:syslog_timestamp} %{SYSLOGHOST:syslog_hostname} %{DATA:syslog_appname} %{DATA:syslog_procid} %{DATA:syslog_msgid} %{DATA:syslog_sd} - %{GREEDYDATA:json_message}' 
+    }
+    overwrite => ["message"]
+  }
+
+  # Try to parse the JSON payload, but don't fail if it's not valid JSON
+  json {
+    source => "json_message"
+    target => "openshift_log"
+    skip_on_invalid_json => true
+  }
+
+  # If JSON parsing failed, try to extract the JSON part from the message
+  if "_jsonparsefailure" in [tags] {
+    grok {
+      match => { 
+        "json_message" => "(?<json_part>\\{.*\\})"
+      }
+      overwrite => ["json_message"]
+    }
+    
+    # Try parsing again if we extracted a JSON part
+    if [json_part] {
+      json {
+        source => "json_part"
+        target => "openshift_log"
+        remove_field => ["json_part"]
+      }
+    }
+    
+    # If we still have a parse failure, create a basic structure with the raw message
+    if "_jsonparsefailure" in [tags] {
+      mutate {
+        add_field => {
+          "[openshift_log]" => {
+            "message" => "%{json_message}"
+          }
+        }
+        remove_tag => ["_jsonparsefailure"]
+      }
+    }
+  }
+
+  # Extract pod name for filtering
+  mutate {
+    add_field => { "app_instance" => "%{[openshift_log][kubernetes][pod_name]}" }
+  }
+
+  # Filter only appx|xfe instances
+  if [app_instance] !~ "appx|xfe" {
+    drop {}
+  }
+
+  # Process structured data if exists
+  if [openshift_log][structured] {
+    json {
+      source => "[openshift_log][structured]"
+      target => "[structured]"
+      skip_on_invalid_json => true
+    }
+    
+    # If structured data parsing failed, treat it as a message
+    if "_jsonparsefailure" in [tags] {
+      mutate {
+        add_field => {
+          "[structured]" => {
+            "message" => "%{[openshift_log][structured]}"
+          }
+        }
+        remove_tag => ["_jsonparsefailure"]
+      }
+    }
+  }
+
+  # Handle ATPF info messages
+  if [structured][msg] =~ "^ATPF info {.*" {
+    grok {
+      match => { 
+        "[structured][msg]" => "^ATPF info { format: '%{GREEDYDATA:atp_feed_format}', feed: '%{GREEDYDATA:atp_feed_type}'"
+      }
+    }
+    mutate {
+      replace => { "[structured][msg]" => "ATPF info" }
+      add_field => {
+        "[structured][atp_feed_format]" => "%{atp_feed_format}"
+        "[structured][atp_feed_type]" => "%{atp_feed_type}"
+      }
+    }
+  }
+
+  # Process error fields
+  if [structured][err] and ![structured][err][message] {
+    mutate {
+      rename => { "[structured][err]" => "[structured][tmp][message]" }
+      rename => { "[structured][tmp]" => "[structured][err]" }
+    }
+  }
+
+  # GeoIP processing
+  if [structured][req][headers][true-client-ip] {
+    geoip {
+      source => "[structured][req][headers][true-client-ip]"
+      target => "[structured][req][geoip]"
+      fields => ["city_name", "continent_code", "country_name"]
+    }
+  }
+
+  # User email domain extraction
+  if [structured][user][email] =~ ".+@.+" {
+    mutate {
+      add_field => { "[structured][user][domain]" => "%{[structured][user][email]}" }
+    }
+    mutate {
+      gsub => ["[structured][user][domain]", "^.+@", ""]
+    }
+  }
+
+  # Copy request fields
+  if [structured][req] {
+    mutate {
+      copy => { 
+        "[structured][req][url]" => "[structured][req][url]" 
+        "[structured][req][path]" => "[structured][req][path]" 
+        "[structured][req][method]" => "[structured][req][method]" 
+      }
+    }
+
+    if [structured][req][headers] {
+      mutate {
+        copy => { 
+          "[structured][req][headers][true-client-ip]" => "[structured][req][headers][true-client-ip]"
+          "[structured][req][headers][user-agent]" => "[structured][req][headers][user-agent]"
+          "[structured][req][headers][x-ui]" => "[structured][req][headers][x-ui]"
+          "[structured][req][headers][x-cp4s]" => "[structured][req][headers][x-cp4s]"
+        }
+      }
+    }
+
+    # Classify endpoints
+    if ([structured][req][url] =~ /^\/(api\/)?taxii/) {
+      mutate { add_field => { "[structured][req][endpoint]" => "taxii" } }
+    } else if ([structured][req][url] =~ /\/comments\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "comments" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?url\/mobile\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "url mobile" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?url\/malware\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "url malware" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?url\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "url" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?app\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "app" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?ipr\/history\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "ipr history" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?ipr\/malware\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "ipr malware" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?ipr\/asn\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "ipr asn" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?ipr\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "ipr" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?resolve\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "resolve" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?malware\/familyext\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "malware familyext" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?malware\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "malware" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?signature\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "signature" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?vulnerabilities\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "vulnerabilities" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?casefiles\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "casefiles" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?collection\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "collection" } }
+    } else if ([structured][req][url] =~ /^\/(api\/)?hub\//) {
+      mutate { add_field => { "[structured][req][endpoint]" => "hub" } }
+    }
+  }
+
+  # Prune unwanted fields
+  prune {
+    blacklist_names => [
+      "^caseFile", "^group", "^mail", "^ma_xgs", "^num", "req$", 
+      "^sbsSubscri", "^subscription", "^userDataModel", "^e.originalError", 
+      "^e.request", "^info.", "^taxii_11:Inbox_Message", "^taxii_11:Poll_Request", 
+      "^history", "^reject.request", "^status$"
+    ]
+  }
+
+  # Process error field
+  if [structured][error] {
+    json_encode {
+      source => "[structured][error]"
+      target => "[structured][error]"
+    }
+  }
+
+  # Clean up user field
+  if [structured][user] {
+    ruby {
+      code => "
+        event.set('[structured][user]', {'user' => event.get('[structured][user]')}) if event.get('[structured][user]').is_a? String"
+    }
+  }
+
+  # Remove unwanted fields
+  mutate {
+    remove_field => [
+      "achievement", "appEnv", "beginTimestamp", "body", "config", 
+      "data", "contents", "event", "endTimestamp", "headers", 
+      "owner", "recommendations", "sbsEventSummary", "tlpColor",
+      "[structured][user][_json]", "[structured][user][apiKeyName]", 
+      "[structured][err][message]", "watson_metrics", "json_message",
+      "openshift_log.structured"
+    ]
+  }
+}
+
+output {
+  elasticsearch {
+    index => "logstash-appx-%{+YYYY.MM.dd}"
+    hosts => "elasticsearch-svc.default.svc.cluster.local:9200"
+  }
+}

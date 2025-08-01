@@ -1,0 +1,51 @@
+apiVersion: observability.openshift.io/v1
+kind: ClusterLogForwarder
+metadata:
+  name: instance
+  namespace: openshift-logging
+spec:
+  serviceAccount:
+    name: log-collector-kd
+  collector:
+    type: vector
+    resources:
+      limits:
+        memory: 500Mi
+  inputs:
+    - name: only-xfe-logs
+      application:
+        namespaces:
+          - xfe
+    - name: appx-logs
+      application:
+        namespaces:
+          - appx-production
+  outputs:
+    - name: rsyslog-east
+      type: syslog
+      url: 'tls://16974:5044'
+    - name: rsyslog-east-new-elk
+      type: syslog
+      url: 'tls://87c6b.appdomain.cloud:5044'
+    - name: appx-london
+      type: syslog
+      url: 'tls://169:50455'
+    - name: appx-london-new-elk
+      type: syslog
+      url: 'tls://591.appdomain.cloud:5045'
+  pipelines:
+    - name: to-xfe-elk
+      inputRefs:
+        - only-xfe-logs
+      outputRefs:
+        - rsyslog-east
+        - rsyslog-east-new-elk
+      parse: json
+    - name: to-appx-elk
+      inputRefs:
+        - appx-logs
+      outputRefs:
+        - appx-london
+        - appx-london-new-elk
+      parse: json
+
